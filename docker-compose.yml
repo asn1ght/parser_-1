@@ -1,0 +1,16 @@
+services:
+  parser:
+    build: .
+    container_name: aliceai-parser
+    restart: always
+    env_file: .env
+    environment:
+      # База и кэш рынка хранятся на постоянном диске (volume)
+      MARKET_DB_PATH: /data/.market.sqlite3
+      MARKET_CACHE_PATH: /data/.market_context_cache.json
+    volumes:
+      - parser-data:/data
+    command: ["python", "main.py", "--loop", "--interval-minutes", "5"]
+
+volumes:
+  parser-data:

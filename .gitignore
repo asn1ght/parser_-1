@@ -1,0 +1,18 @@
+# Секреты и локальные данные
+.env
+.market.sqlite3
+.market_context_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker-данные
+data/
