@@ -5,7 +5,7 @@ from math import ceil
 
 import requests
 
-from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS
+from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS, SCRAPING
 from market_data import save_market_observations, save_quality_check
 from parsers.rest_app import ensure_real_price_access
 from quality_filters import is_acceptable_private_car
@@ -63,7 +63,7 @@ async def parse_drom():
         "token": AVITO_API_TOKEN,
         "region_id": FILTERS["drom_api_region_id"],
         "price2": FILTERS["market_max_price"],
-        "limit": 1000,
+        "limit": SCRAPING["listing_api_limit"],
         "offset": 0,
         "format": "json",
     }

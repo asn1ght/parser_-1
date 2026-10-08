@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import requests
 
-from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS
+from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS, SCRAPING
 from market_data import save_market_observations, save_quality_check
 from parsers.rest_app import ensure_real_price_access
 from quality_filters import is_acceptable_private_car
@@ -104,7 +104,7 @@ async def parse_avito():
         "token": AVITO_API_TOKEN,
         "category_id": 9,
         "region_id": FILTERS["avito_region_id"],
-        "limit": 1000,
+        "limit": SCRAPING["listing_api_limit"],
         "offset": 0,
         "format": "json",
     }
@@ -145,6 +145,7 @@ async def parse_avito():
         )
 
     observations = []
+    rejected_count = 0
     for raw_ad in data:
         if not isinstance(raw_ad, dict):
             continue
@@ -153,6 +154,8 @@ async def parse_avito():
         if description and is_acceptable_private_car(ad):
             save_quality_check(ad["source_id"], True, description)
             observations.append(ad)
+        else:
+            rejected_count += 1
 
     save_market_observations(
         observations,
@@ -167,4 +170,8 @@ async def parse_avito():
             continue
         results.append(ad)
 
+    print(
+        f"[Avito API] Получено: {len(data)}; частных с описанием: {len(observations)}; "
+        f"отклонено фильтром: {rejected_count}; прошло цену/пробег: {len(results)}"
+    )
     return results

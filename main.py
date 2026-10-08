@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from config import FILTERS, SCRAPING, SCHEDULE
 from analyzer import analyze_car
 from market_context import fetch_market_context
+from market_context import begin_market_context_run
 from notifier import format_report, send_telegram_message
 from parsers.avito import parse_avito
 from parsers.autoru import parse_autoru
@@ -13,7 +14,7 @@ from parsers.drom import parse_drom
 from quality_filters import is_acceptable_private_car
 
 
-async def run_parser(collection_hours=None, seen_ids=None):
+async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hours=None):
     """Запускает парсинг всех площадок и возвращает топ-объявлений с анализом.
 
     collection_hours: сколько часов брать для Avito/Auto.ru (None = из настроек).
@@ -25,10 +26,17 @@ async def run_parser(collection_hours=None, seen_ids=None):
 
     # Переопределяем окно сбора только для Avito/Auto.ru (Дром живёт в своём 24ч-окне)
     original_lookbacks = {}
+    original_listing_limit = SCRAPING["listing_api_limit"]
+    begin_market_context_run()
     if collection_hours:
         for key in ("avito_lookback_hours", "autoru_lookback_hours"):
             original_lookbacks[key] = FILTERS[key]
             FILTERS[key] = int(collection_hours)
+    if archive_lookback_hours is not None:
+        for key in ("avito_lookback_hours", "autoru_lookback_hours", "drom_lookback_hours"):
+            original_lookbacks.setdefault(key, FILTERS[key])
+            FILTERS[key] = int(archive_lookback_hours)
+        SCRAPING["listing_api_limit"] = SCHEDULE["archive_listing_api_limit"]
 
     try:
         # Avito (REST-App API)
@@ -59,6 +67,7 @@ async def run_parser(collection_hours=None, seen_ids=None):
             print(f"   Ошибка: {e}")
     finally:
         FILTERS.update(original_lookbacks)
+        SCRAPING["listing_api_limit"] = original_listing_limit
 
     gathered_count = len(all_ads)
     all_ads = [ad for ad in all_ads if is_acceptable_private_car(ad)]
@@ -91,7 +100,7 @@ async def run_parser(collection_hours=None, seen_ids=None):
         comparables = None
         try:
             comparables = await fetch_market_context(ad)
-            if not comparables:
+            if not comparables or len(comparables) < FILTERS["market_min_samples"]:
                 comparables = None  # откат на накопленную историю SQLite
         except Exception as exc:
             print(f"   Рынок {ad.get('brand')} {ad.get('model')} {ad.get('year')}: {exc}")
@@ -199,12 +208,18 @@ async def main():
         if now.hour == SCHEDULE["first_run_hour"]:
             seen_ids.clear()
             collection_hours = SCHEDULE["morning_lookback_hours"]
-            print("🌅 Утренний прогон: собираем за ночь")
+            archive_lookback_hours = SCHEDULE["archive_lookback_hours"]
+            print(f"🌅 Утренний прогон: архив за {archive_lookback_hours} часов")
         else:
             collection_hours = SCHEDULE["regular_lookback_hours"]
+            archive_lookback_hours = None
 
         try:
-            top = await run_parser(collection_hours=collection_hours, seen_ids=seen_ids)
+            top = await run_parser(
+                collection_hours=collection_hours,
+                seen_ids=seen_ids,
+                archive_lookback_hours=archive_lookback_hours,
+            )
             if top:
                 text = format_report(top)
                 if args.console:

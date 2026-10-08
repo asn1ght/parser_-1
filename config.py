@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = TELEGRAM_CHAT_IDS[0] if TELEGRAM_CHAT_IDS else ""
 
 # ====== ФИЛЬТРЫ ПОИСКА ======
 FILTERS = {
-    "max_price": int(os.getenv("MAX_PRICE", "500000")),
+    "max_price": int(os.getenv("MAX_PRICE", "1000000")),
     "max_mileage": int(os.getenv("MAX_MILEAGE", "300000")),
     "location": "sankt-peterburg",
     "radius": 300,             # Радиус поиска, км
@@ -43,6 +43,7 @@ FILTERS = {
     "market_max_price": int(os.getenv("MARKET_MAX_PRICE", "2500000")),
     "market_max_mileage": int(os.getenv("MARKET_MAX_MILEAGE", "500000")),
     "market_context_limit": int(os.getenv("MARKET_CONTEXT_LIMIT", "100")),
+    "market_context_max_searches_per_run": int(os.getenv("MARKET_CONTEXT_MAX_SEARCHES_PER_RUN", "6")),
     "min_market_discount_pct": float(os.getenv("MIN_MARKET_DISCOUNT_PCT", "10")),
     "min_profit": 100000,      # Минимальная желаемая прибыль, руб
 }
@@ -53,7 +54,8 @@ SCRAPING = {
     "delay_min": 3,             # Минимальная задержка между запросами, сек
     "delay_max": 8,             # Максимальная задержка, сек
     "max_quality_checks_per_run": int(os.getenv("MAX_QUALITY_CHECKS_PER_RUN", "30")),
-    "top_count": 15,            # Сколько лучших объявлений показывать
+    "top_count": int(os.getenv("TOP_COUNT", "50")),
+    "listing_api_limit": int(os.getenv("LISTING_FETCH_LIMIT", "250")),
 }
 
 # ====== РАСПИСАНИЕ РАБОТЫ ======
@@ -61,6 +63,8 @@ SCHEDULE = {
     "quiet_start_hour": int(os.getenv("QUIET_START_HOUR", "23")),   # тишина с этого часа
     "first_run_hour": int(os.getenv("FIRST_RUN_HOUR", "8")),        # первый утренний отчёт
     "run_interval_hours": int(os.getenv("RUN_INTERVAL_HOURS", "3")), # каждые N часов
+    "archive_lookback_hours": int(os.getenv("ARCHIVE_LOOKBACK_HOURS", "168")),
+    "archive_listing_api_limit": int(os.getenv("ARCHIVE_LISTING_LIMIT", "1000")),
     "morning_lookback_hours": int(os.getenv("MORNING_LOOKBACK_HOURS", "10")),  # утром собрать за ночь
     "regular_lookback_hours": int(os.getenv("REGULAR_LOOKBACK_HOURS", "3")),   # обычное окно сбора
 }

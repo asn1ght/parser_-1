@@ -14,6 +14,7 @@ from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS
 CACHE_FILE = Path(os.getenv("MARKET_CACHE_PATH", str(Path(__file__).resolve().parent / ".market_context_cache.json")))
 CACHE_TTL_HOURS = float(os.getenv("MARKET_CONTEXT_TTL_HOURS", "24"))
 _QUOTA_EXHAUSTED = False
+_SEARCHES_THIS_RUN = 0
 
 
 class QuotaExhausted(RuntimeError):
@@ -23,6 +24,11 @@ class QuotaExhausted(RuntimeError):
 AVITO_URL = "https://rest-app.net/api/ads"
 AUTORU_URL = "https://rest-app.net/api-auto-ru/ads"
 DROM_URL = "https://rest-app.net/api-drom-ru/ads"
+
+
+def begin_market_context_run():
+    global _SEARCHES_THIS_RUN
+    _SEARCHES_THIS_RUN = 0
 
 
 def _number(value):
@@ -105,16 +111,20 @@ def _fetch_sync(site, brand, model, year, history_hours, exclude_id):
                 "category_id": 9,
                 "region_id": FILTERS["avito_region_id"],
                 "q": f"{brand} {model}".strip(),
-                "limit": FILTERS["market_context_limit"],
+                "limit": min(FILTERS["market_context_limit"], 100),
                 "offset": 0,
                 **_window(history_hours),
             },
         )
-        comparables = [_to_comparable(raw, "avito") for raw in rows if isinstance(raw, dict)]
+        comparables = [
+            item for raw in rows if isinstance(raw, dict)
+            for item in (_to_comparable(raw, "avito"),)
+            if _matches(item, brand_key, model_key, year)
+        ]
     elif site == "autoru":
         rows = _fetch(
             AUTORU_URL,
-            {**{"region_id": FILTERS["autoru_api_region_id"], "limit": FILTERS["market_context_limit"], "offset": 0}, **_window(history_hours)},
+            {**{"region_id": FILTERS["autoru_api_region_id"], "limit": min(FILTERS["market_context_limit"], 100), "offset": 0}, **_window(history_hours)},
         )
         comparables = [
             item for raw in rows if isinstance(raw, dict)
@@ -124,7 +134,7 @@ def _fetch_sync(site, brand, model, year, history_hours, exclude_id):
     elif site == "drom":
         rows = _fetch(
             DROM_URL,
-            {**{"region_id": FILTERS["drom_api_region_id"], "limit": FILTERS["market_context_limit"], "offset": 0}, **_window(history_hours)},
+            {**{"region_id": FILTERS["drom_api_region_id"], "limit": min(FILTERS["market_context_limit"], 100), "offset": 0}, **_window(history_hours)},
         )
         comparables = [
             item for raw in rows if isinstance(raw, dict)
@@ -171,7 +181,7 @@ def _save_disk_cache(cache):
 
 
 async def fetch_market_context(ad):
-    global _QUOTA_EXHAUSTED
+    global _QUOTA_EXHAUSTED, _SEARCHES_THIS_RUN
     if _QUOTA_EXHAUSTED:
         return []
 
@@ -194,7 +204,10 @@ async def fetch_market_context(ad):
                 _save_disk_cache(disk)
 
         if key not in _CACHE:
+            if _SEARCHES_THIS_RUN >= FILTERS["market_context_max_searches_per_run"]:
+                return []
             history_hours = int(FILTERS["market_history_days"]) * 24
+            _SEARCHES_THIS_RUN += 1
             try:
                 items = await asyncio.to_thread(
                     _fetch_sync,
