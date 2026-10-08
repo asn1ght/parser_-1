@@ -1,6 +1,7 @@
 import asyncio
 import re
 from datetime import datetime, timedelta
+from math import ceil
 
 import requests
 
@@ -68,11 +69,11 @@ async def parse_drom():
     }
     now = datetime.now()
     lookback_hours = FILTERS["drom_lookback_hours"]
-    if lookback_hours > 0:
-        params["date1"] = (now - timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M:%S")
-        params["date2"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        params["last_m"] = min(30, max(1, FILTERS["drom_lookback_minutes"]))
+    # Drom API принимает date1/date2 только в формате YYYY-MM-DD (с временем возвращает 0),
+    # поэтому берём окно в целых днях, а точное окно отсекаем клиентски по полю dt.
+    days_back = max(1, int(ceil(lookback_hours / 24)))
+    params["date1"] = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    params["date2"] = now.strftime("%Y-%m-%d")
     try:
         response = await asyncio.to_thread(requests.get, API_URL, params=params, timeout=30)
     except requests.RequestException as exc:
@@ -96,13 +97,25 @@ async def parse_drom():
         raise RuntimeError("Drom REST-App returned an unexpected data format")
 
     accepted = []
+    rejected_count = 0
+    cutoff = now - timedelta(hours=lookback_hours)
     for raw_ad in data:
         if not isinstance(raw_ad, dict):
             continue
+        dt_raw = str(raw_ad.get("dt") or "").strip()
+        if dt_raw and lookback_hours > 0:
+            try:
+                if datetime.strptime(dt_raw, "%Y-%m-%d %H:%M:%S") < cutoff:
+                    rejected_count += 1
+                    continue
+            except ValueError:
+                pass
         ad = _normalize_ad(raw_ad)
         if not (ad["source_id"] and ad["brand"] and ad["model"] and ad["year"] and ad["price"]):
+            rejected_count += 1
             continue
-        if not ad["description"].strip() or not is_acceptable_private_car(ad):
+        if not ad["description"].strip() or not is_acceptable_private_car(ad, require_private_seller=False):
+            rejected_count += 1
             continue
         save_quality_check(ad["source_id"], True, ad["description"])
         accepted.append(ad)
@@ -111,6 +124,9 @@ async def parse_drom():
         accepted,
         retention_days=FILTERS["market_history_days"],
         price_quality="verified",
+    )
+    print(
+        f"[Drom API] Получено: {len(data)}; без признаков тотала: {len(accepted)}; отсеяно: {rejected_count}"
     )
     return [
         ad for ad in accepted

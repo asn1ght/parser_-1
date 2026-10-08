@@ -10,7 +10,7 @@ services:
       MARKET_CACHE_PATH: /data/.market_context_cache.json
     volumes:
       - parser-data:/data
-    command: ["python", "main.py", "--loop", "--interval-minutes", "5"]
+    command: ["python", "main.py"]
 
 volumes:
   parser-data:

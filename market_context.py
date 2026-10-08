@@ -105,7 +105,7 @@ def _fetch_sync(site, brand, model, year, history_hours, exclude_id):
                 "category_id": 9,
                 "region_id": FILTERS["avito_region_id"],
                 "q": f"{brand} {model}".strip(),
-                "limit": 1000,
+                "limit": FILTERS["market_context_limit"],
                 "offset": 0,
                 **_window(history_hours),
             },
@@ -114,7 +114,7 @@ def _fetch_sync(site, brand, model, year, history_hours, exclude_id):
     elif site == "autoru":
         rows = _fetch(
             AUTORU_URL,
-            {**{"region_id": FILTERS["autoru_api_region_id"], "limit": 1000, "offset": 0}, **_window(history_hours)},
+            {**{"region_id": FILTERS["autoru_api_region_id"], "limit": FILTERS["market_context_limit"], "offset": 0}, **_window(history_hours)},
         )
         comparables = [
             item for raw in rows if isinstance(raw, dict)
@@ -124,7 +124,7 @@ def _fetch_sync(site, brand, model, year, history_hours, exclude_id):
     elif site == "drom":
         rows = _fetch(
             DROM_URL,
-            {**{"region_id": FILTERS["drom_api_region_id"], "limit": 1000, "offset": 0}, **_window(history_hours)},
+            {**{"region_id": FILTERS["drom_api_region_id"], "limit": FILTERS["market_context_limit"], "offset": 0}, **_window(history_hours)},
         )
         comparables = [
             item for raw in rows if isinstance(raw, dict)
@@ -222,26 +222,31 @@ async def fetch_market_context(ad):
 def evaluate_market(ad, comparables, min_samples=None):
     """Return median-based market estimate and cheaper alternatives."""
     min_samples = FILTERS["market_min_samples"] if min_samples is None else min_samples
+    price = int(ad.get("price") or 0)
+    year_range = f"{int(ad.get('year') or 0) - 1}-{int(ad.get('year') or 0) + 1}"
+
+    sorted_comparables = sorted(comparables, key=lambda item: item["price"])
+    alternatives = [item for item in sorted_comparables if item["price"] < price]
+
     if len(comparables) < min_samples:
         return {
             "market_price": None,
             "sample_count": len(comparables),
-            "year_range": f"{int(ad.get('year') or 0) - 1}-{int(ad.get('year') or 0) + 1}",
+            "year_range": year_range,
             "mileage_matched": False,
             "discount_pct": None,
-            "alternatives": [],
+            "alternatives": alternatives,
+            "comparables": sorted_comparables,
         }
 
     market_price = int(median(item["price"] for item in comparables))
-    price = int(ad.get("price") or 0)
     discount_pct = round((market_price - price) / market_price * 100, 1) if market_price else 0
-    alternatives = [item for item in comparables if item["price"] < price]
-    alternatives.sort(key=lambda item: item["price"])
     return {
         "market_price": market_price,
         "sample_count": len(comparables),
-        "year_range": f"{int(ad.get('year') or 0) - 1}-{int(ad.get('year') or 0) + 1}",
+        "year_range": year_range,
         "mileage_matched": True,
         "discount_pct": discount_pct,
         "alternatives": alternatives,
+        "comparables": sorted_comparables,
     }

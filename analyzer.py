@@ -26,12 +26,14 @@ def analyze_car(ad, comparables=None):
         "mileage": ad.get("mileage", 0),
         "url": ad.get("url", ""),
         "site": ad.get("site", ""),
+        "source_id": ad.get("source_id", ""),
         "market_price": estimate["market_price"] if estimate else None,
         "market_samples": estimate["sample_count"] if estimate else 0,
         "market_min_samples": FILTERS["market_min_samples"],
         "market_year_range": estimate["year_range"] if estimate else "",
         "market_mileage_matched": estimate["mileage_matched"] if estimate else False,
         "alternatives": estimate.get("alternatives", []) if estimate else [],
+        "comparables": estimate.get("comparables", []) if estimate else [],
         "discount_pct": estimate["discount_pct"] if estimate else None,
         "discount_amount": 0,
         "total_costs": 0,
@@ -50,7 +52,7 @@ def analyze_car(ad, comparables=None):
     prep_total = sum(PREP_COSTS.values())
     selling_total = sum(SELLING_COSTS.values())
     profit = discount_amount - prep_total - selling_total
-    red_flags = rejection_reasons(ad)
+    red_flags = rejection_reasons(ad, require_private_seller=(ad.get("site") != "drom"))
     is_below_market = estimate["discount_pct"] >= FILTERS["min_market_discount_pct"]
 
     result.update(

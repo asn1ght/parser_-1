@@ -1,12 +1,12 @@
 import asyncio
-from config import FILTERS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from config import FILTERS, TELEGRAM_TOKEN, TELEGRAM_CHAT_IDS
 from telegram import Bot
 
 
 async def send_telegram_message(text):
-    """Отправляет сообщение в Telegram."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[!] Токен или chat_id не настроены в config.py")
+    """Отправляет сообщение во все настроенные чаты Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_IDS:
+        print("[!] Токен или chat_id не настроены")
         print("--- Сообщение ---")
         print(text)
         return
@@ -14,14 +14,8 @@ async def send_telegram_message(text):
     bot = Bot(token=TELEGRAM_TOKEN)
     # Telegram ограничивает сообщение 4096 символами
     if len(text) <= 4096:
-        await bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode="Markdown",
-            disable_web_page_preview=False,
-        )
+        chunks = [text]
     else:
-        # Разбиваем на части
         chunks = []
         current = ""
         for line in text.split("\n"):
@@ -33,13 +27,17 @@ async def send_telegram_message(text):
         if current:
             chunks.append(current)
 
+    for chat_id in TELEGRAM_CHAT_IDS:
         for chunk in chunks:
-            await bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=chunk,
-                parse_mode="Markdown",
-                disable_web_page_preview=False,
-            )
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=False,
+                )
+            except Exception as exc:
+                print(f"[!] Не удалось отправить в чат {chat_id}: {exc}")
             await asyncio.sleep(0.5)
 
 
@@ -93,6 +91,16 @@ def format_report(analyses):
                 f"📊 Рынок: есть {a['market_samples']} аналогов, "
                 f"нужно {a['market_min_samples']}"
             )
+            comparables = a.get("comparables") or []
+            if comparables:
+                lines.append("🔍 Найденные аналоги (для справки):")
+                for comparable in comparables[:3]:
+                    lines.append(
+                        f"   • {comparable['brand']} {comparable['model']} {comparable['year']}, "
+                        f"{comparable['mileage']:,} км, {comparable['price']:,} руб".replace(",", " ")
+                    )
+                    if comparable.get("url"):
+                        lines.append(f"     🔗 [Открыть]({comparable['url']})")
 
         if a["red_flags"]:
             lines.append(f"🚩 Красные флаги: {', '.join(a['red_flags'])}")

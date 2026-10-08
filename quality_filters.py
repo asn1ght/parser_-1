@@ -68,7 +68,7 @@ TOTAL_LOSS_PATTERNS = (
 )
 
 
-def rejection_reasons(ad):
+def rejection_reasons(ad, require_private_seller=True):
     reasons = []
     seller_type = str(ad.get("seller_type") or "").casefold()
     seller_text = " ".join(
@@ -93,7 +93,7 @@ def rejection_reasons(ad):
     ))
     if any(pattern.search(searchable_text) for pattern in TOTAL_LOSS_PATTERNS):
         reasons.append("тотал или тяжелые повреждения")
-    if not has_private_seller_signal(ad):
+    if require_private_seller and not has_private_seller_signal(ad):
         reasons.append("не подтвержден частный продавец")
 
     return reasons
@@ -129,5 +129,5 @@ def has_private_seller_signal(ad):
     )
 
 
-def is_acceptable_private_car(ad):
-    return not rejection_reasons(ad)
+def is_acceptable_private_car(ad, require_private_seller=True):
+    return not rejection_reasons(ad, require_private_seller=require_private_seller)

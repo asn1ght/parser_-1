@@ -1,9 +1,9 @@
 import asyncio
 import argparse
-import time
 import sys
+from datetime import datetime, timedelta
 
-from config import SCRAPING
+from config import FILTERS, SCRAPING, SCHEDULE
 from analyzer import analyze_car
 from market_context import fetch_market_context
 from notifier import format_report, send_telegram_message
@@ -13,37 +13,52 @@ from parsers.drom import parse_drom
 from quality_filters import is_acceptable_private_car
 
 
-async def run_parser():
-    """Запускает парсинг всех площадок и возвращает топ-объявлений с анализом."""
+async def run_parser(collection_hours=None, seen_ids=None):
+    """Запускает парсинг всех площадок и возвращает топ-объявлений с анализом.
+
+    collection_hours: сколько часов брать для Avito/Auto.ru (None = из настроек).
+    seen_ids: множество уже показанных source_id — такие объявления пропускаются.
+    """
+    seen_ids = seen_ids or set()
     print("🚀 Запуск парсера...")
     all_ads = []
 
-    # Avito (REST-App API)
-    print("📋 Парсинг Авито...")
-    try:
-        avito_ads = await parse_avito()
-        print(f"   Найдено: {len(avito_ads)}")
-        all_ads.extend(avito_ads)
-    except Exception as e:
-        print(f"   Ошибка: {e}")
+    # Переопределяем окно сбора только для Avito/Auto.ru (Дром живёт в своём 24ч-окне)
+    original_lookbacks = {}
+    if collection_hours:
+        for key in ("avito_lookback_hours", "autoru_lookback_hours"):
+            original_lookbacks[key] = FILTERS[key]
+            FILTERS[key] = int(collection_hours)
 
-    # Авто.ру (REST-App API)
-    print("📋 Парсинг Авто.ру...")
     try:
-        autoru_ads = await parse_autoru()
-        print(f"   Найдено: {len(autoru_ads)}")
-        all_ads.extend(autoru_ads)
-    except Exception as e:
-        print(f"   Ошибка: {e}")
+        # Avito (REST-App API)
+        print("📋 Парсинг Авито...")
+        try:
+            avito_ads = await parse_avito()
+            print(f"   Найдено: {len(avito_ads)}")
+            all_ads.extend(avito_ads)
+        except Exception as e:
+            print(f"   Ошибка: {e}")
 
-    # Дром (REST-App API)
-    print("📋 Парсинг Дром...")
-    try:
-        drom_ads = await parse_drom()
-        print(f"   Найдено: {len(drom_ads)}")
-        all_ads.extend(drom_ads)
-    except Exception as e:
-        print(f"   Ошибка: {e}")
+        # Авто.ру (REST-App API)
+        print("📋 Парсинг Авто.ру...")
+        try:
+            autoru_ads = await parse_autoru()
+            print(f"   Найдено: {len(autoru_ads)}")
+            all_ads.extend(autoru_ads)
+        except Exception as e:
+            print(f"   Ошибка: {e}")
+
+        # Дром (REST-App API)
+        print("📋 Парсинг Дром...")
+        try:
+            drom_ads = await parse_drom()
+            print(f"   Найдено: {len(drom_ads)}")
+            all_ads.extend(drom_ads)
+        except Exception as e:
+            print(f"   Ошибка: {e}")
+    finally:
+        FILTERS.update(original_lookbacks)
 
     gathered_count = len(all_ads)
     all_ads = [ad for ad in all_ads if is_acceptable_private_car(ad)]
@@ -61,6 +76,14 @@ async def run_parser():
             unique_ads.append(ad)
 
     print(f"Уникальных: {len(unique_ads)}")
+
+    if seen_ids:
+        before = len(unique_ads)
+        unique_ads = [
+            ad for ad in unique_ads
+            if str(ad.get("source_id") or ad.get("url") or "") not in seen_ids
+        ]
+        print(f"Отсеяно уже показанных: {before - len(unique_ads)}; новых: {len(unique_ads)}")
 
     # Анализ с живым контекстом рынка
     analyses = []
@@ -113,44 +136,43 @@ async def run_parser():
         print(f"Показано кандидатов без оценки рынка: {len(top)}")
     print(f"Показано топ-{len(top)}")
 
+    for analysis in top:
+        sid = str(analysis.get("source_id") or "")
+        if sid:
+            seen_ids.add(sid)
+
     return top
+
+
+def _run_hours(schedule):
+    hours = []
+    hour = schedule["first_run_hour"]
+    while hour < schedule["quiet_start_hour"]:
+        hours.append(hour)
+        hour += schedule["run_interval_hours"]
+    return hours
+
+
+def _seconds_until_next_run(now, run_hours, first_run_hour):
+    current = now.hour + now.minute / 60.0 + now.second / 3600.0
+    for hour in run_hours:
+        if current < hour:
+            target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            return max(0.0, (target - now).total_seconds())
+    target = (now + timedelta(days=1)).replace(hour=first_run_hour, minute=0, second=0, microsecond=0)
+    return (target - now).total_seconds()
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Парсер авто для перекупа")
     parser.add_argument("--console", action="store_true", help="Вывод в консоль вместо Telegram")
-    parser.add_argument("--loop", action="store_true", help="Циклический режим")
-    parser.add_argument("--interval", type=int, default=None, help="Интервал в часах (для --loop)")
-    parser.add_argument("--interval-minutes", type=int, default=5, help="Интервал в минутах (для --loop; по умолчанию 5)")
+    parser.add_argument("--once", action="store_true", help="Один прогон без расписания")
+    parser.add_argument("--loop", action="store_true", help="Циклический режим (включён по умолчанию)")
+    parser.add_argument("--interval", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--interval-minutes", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    if args.loop:
-        while True:
-            try:
-                top = await run_parser()
-                if args.console:
-                    print("\n" + "=" * 60)
-                    print(format_report(top))
-                    print("=" * 60)
-                else:
-                    await send_telegram_message(format_report(top))
-
-                if args.interval is not None:
-                    interval_seconds = args.interval * 3600
-                    interval_label = f"{args.interval} часа(ов)"
-                else:
-                    interval_seconds = args.interval_minutes * 60
-                    interval_label = f"{args.interval_minutes} минута(ы)"
-                print(f"\n⏳ Следующий запуск через {interval_label}...")
-                await asyncio.sleep(interval_seconds)
-            except KeyboardInterrupt:
-                print("\nОстановка парсера.")
-                sys.exit(0)
-            except Exception as e:
-                print(f"\nОшибка в цикле: {e}")
-                print(f"Повтор через 5 минут...")
-                await asyncio.sleep(300)
-    else:
+    if args.once:
         top = await run_parser()
         if args.console:
             print("\n" + "=" * 60)
@@ -158,6 +180,47 @@ async def main():
             print("=" * 60)
         else:
             await send_telegram_message(format_report(top))
+        return
+
+    run_hours = _run_hours(SCHEDULE)
+    seen_ids = set()
+    print(
+        f"Расписание: отчёты в {', '.join(f'{h}:00' for h in run_hours)}, "
+        f"тишина с {SCHEDULE['quiet_start_hour']}:00 до {SCHEDULE['first_run_hour']}:00"
+    )
+
+    while True:
+        now = datetime.now()
+        delay = _seconds_until_next_run(now, run_hours, SCHEDULE["first_run_hour"])
+        print(f"\n⏳ Следующий запуск через ~{int(delay // 60)} мин...")
+        await asyncio.sleep(delay)
+
+        now = datetime.now()
+        if now.hour == SCHEDULE["first_run_hour"]:
+            seen_ids.clear()
+            collection_hours = SCHEDULE["morning_lookback_hours"]
+            print("🌅 Утренний прогон: собираем за ночь")
+        else:
+            collection_hours = SCHEDULE["regular_lookback_hours"]
+
+        try:
+            top = await run_parser(collection_hours=collection_hours, seen_ids=seen_ids)
+            if top:
+                text = format_report(top)
+                if args.console:
+                    print("\n" + "=" * 60)
+                    print(text)
+                    print("=" * 60)
+                else:
+                    await send_telegram_message(text)
+            else:
+                print("Нет новых объявлений в этом цикле.")
+        except KeyboardInterrupt:
+            print("\nОстановка парсера.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"\nОшибка в цикле: {e}")
+            print("Следующая попытка по расписанию...")
 
 
 if __name__ == "__main__":

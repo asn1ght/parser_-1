@@ -35,8 +35,8 @@ docker compose down             # остановить
 
 - **Секреты** — только в `.env` на сервере. В git не попадают (см. `.gitignore`).
 - **База** `.market.sqlite3` и кэш `.market_context_cache.json` хранятся в volume `parser-data` (путь `/data` внутри контейнера) и переживают редеплои.
-- **Интервал** задаётся в `docker-compose.yml` (`--interval-minutes 5`), можно поменять на любой.
-- **Режим «один прогон»** — если нужен разовый запуск, замените команду на `python main.py --console` или запустите без `--loop`.
+- **Интервал и расписание** задаются переменными окружения в `.env` (`FIRST_RUN_HOUR`, `RUN_INTERVAL_HOURS`, `QUIET_START_HOUR`, `MORNING_LOOKBACK_HOURS`, `REGULAR_LOOKBACK_HOURS`). По умолчанию: отчёты в 8:00/11:00/14:00/17:00/20:00, тишина 23:00–8:00.
+- **Разовый запуск** — `python main.py --once --console` (или без `--console` для отправки в Telegram).
 
 ## Без Docker (systemd)
 
@@ -57,7 +57,7 @@ After=network-online.target
 [Service]
 WorkingDirectory=/opt/parser
 EnvironmentFile=/opt/parser/.env
-ExecStart=/opt/parser/venv/bin/python main.py --loop --interval-minutes 5
+ExecStart=/opt/parser/venv/bin/python main.py
 Restart=always
 RestartSec=10
 
