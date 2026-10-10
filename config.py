@@ -2,9 +2,16 @@
 #  config.py — настройки парсера
 # ============================
 import os
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_MOSCOW_TIMEZONE = timezone(timedelta(hours=3), "MSK")
+
+
+def now_moscow():
+    return datetime.now(timezone.utc).astimezone(_MOSCOW_TIMEZONE).replace(tzinfo=None)
 
 AVITO_API_LOGIN = os.getenv("login", "").strip()
 AVITO_API_TOKEN = os.getenv("token_avito", "").strip()
@@ -39,7 +46,7 @@ FILTERS = {
     "avito_lookback_hours": int(os.getenv("AVITO_LOOKBACK_HOURS", "2")),
     "avito_lookback_minutes": int(os.getenv("AVITO_LOOKBACK_MINUTES", "30")),
     "market_history_days": int(os.getenv("MARKET_HISTORY_DAYS", "30")),
-    "market_min_samples": int(os.getenv("MARKET_MIN_SAMPLES", "5")),
+    "market_min_samples": int(os.getenv("MARKET_MIN_SAMPLES", "3")),
     "market_max_price": int(os.getenv("MARKET_MAX_PRICE", "2500000")),
     "market_max_mileage": int(os.getenv("MARKET_MAX_MILEAGE", "500000")),
     "market_context_limit": int(os.getenv("MARKET_CONTEXT_LIMIT", "100")),

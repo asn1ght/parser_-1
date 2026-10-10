@@ -24,6 +24,28 @@ COMPANY_DESCRIPTION_PATTERNS = (
     re.compile(r"\b(?:автомобильная компания|группа компаний)\b.{0,250}\b(?:продаж|продаем|автомобил)", re.IGNORECASE),
     re.compile(r"\b(?:ооо|ао|пао|зао|ип)\b.{0,160}\b(?:продаж|автомобил|авто)", re.IGNORECASE),
 )
+NEGATED_PRICE_CONDITIONS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bбез\s+(?:оформления\s+)?кредит\w*\b",
+        r"\bкредит\w*\s+не\s+(?:нужен|нужно|обязателен|требуется)\b",
+        r"\bбез\s+трейд[ -]?ин\b",
+        r"\bтрейд[ -]?ин\s+не\s+(?:нужен|нужно|обязателен|обязательно|требуется)\b",
+        r"\bбез\s+(?:допов|дополнительного оборудования|страховки)\b",
+    )
+)
+CONDITIONAL_PRICE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:цена|стоимость|выгода|скидка)\b.{0,60}\b(?:кредит\w*|рассрочк\w*|"
+        r"трейд[ -]?ин|trade[ -]?in|страховк\w*|допоборудован\w*)\b",
+        r"\b(?:при|только при|после)\s+(?:оформлении|одобрении|покупке|сдаче)\b"
+        r".{0,60}\b(?:кредит\w*|рассрочк\w*|трейд[ -]?ин|trade[ -]?in)\b",
+        r"\b(?:кредит\w*|рассрочк\w*|трейд[ -]?ин|trade[ -]?in)\b.{0,60}"
+        r"\b(?:цена|стоимость|выгод\w*|скидк\w*)\b",
+        r"\b(?:цена|стоимость)\s+от\s+\d",
+    )
+)
 PRIVATE_SELLER_MARKERS = (
     "частное лицо",
     "частный продавец",
@@ -95,8 +117,20 @@ def rejection_reasons(ad, require_private_seller=True):
         reasons.append("тотал или тяжелые повреждения")
     if require_private_seller and not has_private_seller_signal(ad):
         reasons.append("не подтвержден частный продавец")
+    if has_conditional_price(ad):
+        reasons.append("цена зависит от кредита, trade-in или дополнительных условий")
 
     return reasons
+
+
+def has_conditional_price(ad):
+    text = " ".join(
+        str(ad.get(key) or "")
+        for key in ("title", "description", "info", "price_conditions", "payment_conditions")
+    ).casefold().replace("ё", "е")
+    for pattern in NEGATED_PRICE_CONDITIONS:
+        text = pattern.sub(" ", text)
+    return any(pattern.search(text) for pattern in CONDITIONAL_PRICE_PATTERNS)
 
 
 def has_private_seller_signal(ad):

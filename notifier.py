@@ -9,7 +9,7 @@ async def send_telegram_message(text):
         print("[!] Токен или chat_id не настроены")
         print("--- Сообщение ---")
         print(text)
-        return
+        return False
 
     bot = Bot(token=TELEGRAM_TOKEN)
     # Telegram ограничивает сообщение 4096 символами
@@ -27,6 +27,7 @@ async def send_telegram_message(text):
         if current:
             chunks.append(current)
 
+    delivery_succeeded = True
     for chat_id in TELEGRAM_CHAT_IDS:
         for chunk in chunks:
             try:
@@ -37,14 +38,16 @@ async def send_telegram_message(text):
                     disable_web_page_preview=False,
                 )
             except Exception as exc:
+                delivery_succeeded = False
                 print(f"[!] Не удалось отправить в чат {chat_id}: {exc}")
             await asyncio.sleep(0.5)
+    return delivery_succeeded
 
 
 def format_report(analyses):
     """Форматирует результаты в текст для Telegram с актуальными ссылками."""
     lines = []
-    lines.append("🔍 *Парсер авто — новый заход*")
+    lines.append("🔍 *Подтверждённые предложения рынка*")
     lines.append(f"Найдено объявлений: {len(analyses)}")
     lines.append(f"Показано топ-{len(analyses)}")
     lines.append("──────────────────────────")
@@ -70,22 +73,33 @@ def format_report(analyses):
                 f"по {a['market_samples']} аналогам ({a['market_year_range']} г.)"
                 .replace(",", " ")
             )
-            if not a["market_mileage_matched"]:
-                lines.append("⚠️ Сопоставимого пробега мало; оценка только по модели и году")
+            match_details = ["марка/модель"]
+            if a.get("generation"):
+                match_details.append(f"поколение {a['generation']}")
+            if a.get("body"):
+                match_details.append(f"кузов {a['body']}")
+            if a.get("engine") or a.get("engine_volume"):
+                engine = " ".join(str(value) for value in (a.get("engine"), a.get("engine_volume")) if value)
+                match_details.append(f"двигатель {engine}")
+            if a.get("transmission"):
+                match_details.append(f"КПП {a['transmission']}")
+            match_details.append("сопоставимый пробег")
+            lines.append(f"🔎 Сопоставимость: {', '.join(match_details)}")
+            market_site_labels = {
+                "avito": "Avito",
+                "autoru": "Auto.ru",
+                "drom": "Drom",
+            }
+            market_sites = [
+                market_site_labels.get(site, site)
+                for site in a.get("market_sites", [])
+            ]
+            if market_sites:
+                lines.append(f"Источники аналогов: {', '.join(market_sites)}")
             lines.append(
                 f"📉 Ниже рынка: {a['discount_pct']}% "
                 f"({a['discount_amount']:,} руб)".replace(",", " ")
             )
-            lines.append(f"💸 Оценка после расходов: {a['profit']:,} руб".replace(",", " "))
-            if a.get("alternatives"):
-                lines.append("🔁 Дешевле в глобальном поиске:")
-                for alt in a["alternatives"][:3]:
-                    lines.append(
-                        f"   • {alt['brand']} {alt['model']} {alt['year']}, "
-                        f"{alt['mileage']:,} км, {alt['price']:,} руб".replace(",", " ")
-                    )
-                    if alt.get("url"):
-                        lines.append(f"     🔗 [Открыть]({alt['url']})")
         else:
             lines.append(
                 f"📊 Рынок: есть {a['market_samples']} аналогов, "

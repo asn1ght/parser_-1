@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import requests
 
-from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS, SCRAPING
+from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS, SCRAPING, now_moscow
 from market_data import save_market_observations, save_quality_check
 from parsers.rest_app import ensure_real_price_access
 from quality_filters import is_acceptable_private_car
@@ -56,6 +56,19 @@ def _get_mileage(ad):
     return 0
 
 
+def _param_value(ad, *terms):
+    params = ad.get("params", [])
+    if not isinstance(params, list):
+        return ""
+    for item in params:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").casefold().replace("ё", "е")
+        if any(term in name for term in terms):
+            return str(item.get("value") or "").strip()
+    return ""
+
+
 def _normalize_ad(ad):
     title = str(ad.get("title", ""))
     title_parts = [part.strip() for part in title.split(",")]
@@ -75,12 +88,28 @@ def _normalize_ad(ad):
         if isinstance(item, dict)
         and any(word in str(item.get("name", "")).casefold() for word in ("кто прода", "тип продав"))
     ]
+    price_conditions = [
+        str(item.get("value") or "")
+        for item in ad.get("params", [])
+        if isinstance(item, dict)
+        and any(
+            word in str(item.get("name", "")).casefold()
+            for word in ("кредит", "трейд", "услов", "оплат", "цена")
+        )
+    ]
     return {
         "brand": brand,
         "model": model,
+        "generation": str(ad.get("model_2") or _param_value(ad, "поколение")),
         "year": year,
         "price": _number(ad.get("price")),
         "mileage": _get_mileage(ad),
+        "engine": _param_value(ad, "тип двигателя", "двигатель"),
+        "engine_volume": _param_value(ad, "объем двигателя"),
+        "transmission": _param_value(ad, "коробка передач", "трансмиссия"),
+        "body": _param_value(ad, "тип кузова", "кузов"),
+        "condition": _param_value(ad, "состояние"),
+        "price_conditions": " ".join(price_conditions),
         "description": str(ad.get("description") or ad.get("body") or ""),
         "seller": str(ad.get("name") or ""),
         "seller_name": str(ad.get("name") or ""),
@@ -98,7 +127,7 @@ async def parse_avito():
 
     await asyncio.to_thread(ensure_real_price_access)
 
-    now = datetime.now()
+    now = now_moscow()
     params = {
         "login": AVITO_API_LOGIN,
         "token": AVITO_API_TOKEN,

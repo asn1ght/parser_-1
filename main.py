@@ -3,11 +3,20 @@ import argparse
 import sys
 from datetime import datetime, timedelta
 
-from config import FILTERS, SCRAPING, SCHEDULE
+from config import FILTERS, SCRAPING, SCHEDULE, now_moscow
 from analyzer import analyze_car
 from market_context import fetch_market_context
 from market_context import begin_market_context_run
 from notifier import format_report, send_telegram_message
+from market_data import (
+    daily_report_was_sent,
+    filter_previously_sent_ads,
+    load_daily_report_candidates,
+    load_listing_catalog,
+    mark_daily_report_sent,
+    mark_listings_sent,
+    save_daily_report_candidates,
+)
 from parsers.avito import parse_avito
 from parsers.autoru import parse_autoru
 from parsers.drom import parse_drom
@@ -18,9 +27,10 @@ async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hour
     """Запускает парсинг всех площадок и возвращает топ-объявлений с анализом.
 
     collection_hours: сколько часов брать для Avito/Auto.ru (None = из настроек).
-    seen_ids: множество уже показанных source_id — такие объявления пропускаются.
+    seen_ids: legacy set для совместимости; повторные отправки контролирует SQLite.
     """
-    seen_ids = seen_ids or set()
+    if seen_ids is None:
+        seen_ids = set()
     print("🚀 Запуск парсера...")
     all_ads = []
 
@@ -69,8 +79,21 @@ async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hour
         FILTERS.update(original_lookbacks)
         SCRAPING["listing_api_limit"] = original_listing_limit
 
+    all_ads.extend(
+        load_listing_catalog(
+            history_days=FILTERS["market_history_days"],
+            max_price=FILTERS["max_price"],
+            max_mileage=FILTERS["max_mileage"],
+        )
+    )
+    all_ads = filter_previously_sent_ads(all_ads)
     gathered_count = len(all_ads)
-    all_ads = [ad for ad in all_ads if is_acceptable_private_car(ad)]
+    all_ads = [
+        ad for ad in all_ads
+        if is_acceptable_private_car(ad)
+        and 0 < int(ad.get("price") or 0) <= FILTERS["max_price"]
+        and int(ad.get("mileage") or 0) <= FILTERS["max_mileage"]
+    ]
     print(f"\nВсего собрано: {gathered_count} объявлений")
     print(f"Частных и без признаков тотала: {len(all_ads)}")
 
@@ -78,21 +101,17 @@ async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hour
     seen_urls = set()
     unique_ads = []
     for ad in all_ads:
-        if ad["url"] and ad["url"] not in seen_urls:
-            seen_urls.add(ad["url"])
+        identity = (
+            str(ad.get("site") or "").casefold(),
+            str(ad.get("url") or ad.get("source_id") or ""),
+        )
+        if identity[1] and identity not in seen_urls:
+            seen_urls.add(identity)
             unique_ads.append(ad)
-        elif not ad["url"]:
+        elif not identity[1]:
             unique_ads.append(ad)
 
-    print(f"Уникальных: {len(unique_ads)}")
-
-    if seen_ids:
-        before = len(unique_ads)
-        unique_ads = [
-            ad for ad in unique_ads
-            if str(ad.get("source_id") or ad.get("url") or "") not in seen_ids
-        ]
-        print(f"Отсеяно уже показанных: {before - len(unique_ads)}; новых: {len(unique_ads)}")
+    print(f"Уникальных (новые и ранее сохранённые): {len(unique_ads)}")
 
     # Анализ с живым контекстом рынка
     analyses = []
@@ -112,37 +131,25 @@ async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hour
         key=lambda analysis: (
             not analysis["is_below_market"],
             -analysis["discount_pct"] if analysis["discount_pct"] is not None else 0,
-            -analysis["profit"],
         )
     )
 
     good_analyses = [
         analysis
         for analysis in analyses
-        if analysis["is_below_market"] and not analysis["red_flags"]
+        if analysis["is_below_market"]
+        and not analysis["red_flags"]
+        and int(analysis.get("price") or 0) <= FILTERS["max_price"]
+        and int(analysis.get("market_price") or 0) > int(analysis.get("price") or 0)
+        and int(analysis.get("market_samples") or 0) >= FILTERS["market_min_samples"]
+        and float(analysis.get("discount_pct") or 0) >= FILTERS["min_market_discount_pct"]
     ]
-    if good_analyses:
-        top = good_analyses[:SCRAPING["top_count"]]
-    else:
-        unvalued_candidates = [
-            analysis
-            for analysis in analyses
-            if analysis["market_price"] is None and not analysis["red_flags"]
-        ]
-        unvalued_candidates.sort(key=lambda analysis: (analysis["price"], analysis["mileage"]))
-        for analysis in unvalued_candidates:
-            analysis["priority"] = "⚪ РЫНОК НЕ ПОДТВЕРЖДЕН"
-            analysis["recommendation"] = (
-                "Объявление прошло фильтры продавца и состояния, "
-                "но недостаточно аналогов для подтверждения цены ниже рынка."
-            )
-        top = unvalued_candidates[:SCRAPING["top_count"]]
+    good_analyses.sort(key=lambda analysis: -float(analysis["discount_pct"]))
+    top = good_analyses[:SCRAPING["top_count"]]
 
     estimated_count = sum(analysis["market_price"] is not None for analysis in analyses)
     print(f"Оценено по аналогам: {estimated_count} из {len(analyses)}")
     print(f"Ниже рынка на заданный порог: {len(good_analyses)}")
-    if not good_analyses:
-        print(f"Показано кандидатов без оценки рынка: {len(top)}")
     print(f"Показано топ-{len(top)}")
 
     for analysis in top:
@@ -151,6 +158,27 @@ async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hour
             seen_ids.add(sid)
 
     return top
+
+
+async def send_daily_report(report_day, *, console=False):
+    if daily_report_was_sent(report_day):
+        return False
+
+    candidates = load_daily_report_candidates(report_day)
+    candidates.sort(key=lambda analysis: -float(analysis.get("discount_pct") or 0))
+    candidates = candidates[:SCRAPING["top_count"]]
+    text = format_report(candidates)
+    if console:
+        print("\n" + "=" * 60)
+        print(text)
+        print("=" * 60)
+        return False
+
+    delivered = await send_telegram_message(text)
+    if delivered:
+        mark_listings_sent(candidates)
+        mark_daily_report_sent(report_day)
+    return delivered
 
 
 def _run_hours(schedule):
@@ -188,23 +216,26 @@ async def main():
             print(format_report(top))
             print("=" * 60)
         else:
-            await send_telegram_message(format_report(top))
+            delivered = await send_telegram_message(format_report(top))
+            if delivered:
+                mark_listings_sent(top)
         return
 
     run_hours = _run_hours(SCHEDULE)
     seen_ids = set()
     print(
-        f"Расписание: отчёты в {', '.join(f'{h}:00' for h in run_hours)}, "
+        f"Сбор: {', '.join(f'{h}:00' for h in run_hours)}; "
+        f"один Telegram-отчёт в {run_hours[-1]:02d}:00; "
         f"тишина с {SCHEDULE['quiet_start_hour']}:00 до {SCHEDULE['first_run_hour']}:00"
     )
 
     while True:
-        now = datetime.now()
+        now = now_moscow()
         delay = _seconds_until_next_run(now, run_hours, SCHEDULE["first_run_hour"])
         print(f"\n⏳ Следующий запуск через ~{int(delay // 60)} мин...")
         await asyncio.sleep(delay)
 
-        now = datetime.now()
+        now = now_moscow()
         if now.hour == SCHEDULE["first_run_hour"]:
             seen_ids.clear()
             collection_hours = SCHEDULE["morning_lookback_hours"]
@@ -220,16 +251,17 @@ async def main():
                 seen_ids=seen_ids,
                 archive_lookback_hours=archive_lookback_hours,
             )
-            if top:
-                text = format_report(top)
-                if args.console:
-                    print("\n" + "=" * 60)
-                    print(text)
-                    print("=" * 60)
-                else:
-                    await send_telegram_message(text)
+            report_day = now.date().isoformat()
+            save_daily_report_candidates(report_day, top)
+            if now.hour == run_hours[-1]:
+                delivered = await send_daily_report(report_day, console=args.console)
+                if not delivered and not args.console:
+                    print("Ежедневный Telegram-отчёт не отправлен; проверяю Telegram-настройки и доступность.")
             else:
-                print("Нет новых объявлений в этом цикле.")
+                print(
+                    f"В дневную сводку добавлено подтверждённых предложений: {len(top)}; "
+                    f"отчёт будет отправлен в {run_hours[-1]:02d}:00."
+                )
         except KeyboardInterrupt:
             print("\nОстановка парсера.")
             sys.exit(0)

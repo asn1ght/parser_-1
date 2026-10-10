@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import requests
 
-from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS, SCRAPING
+from config import AVITO_API_LOGIN, AVITO_API_TOKEN, FILTERS, SCRAPING, now_moscow
 from market_data import save_market_observations, save_quality_check
 from parsers.rest_app import ensure_real_price_access
 from quality_filters import is_acceptable_private_car
@@ -35,9 +35,15 @@ def _normalize_ad(raw_ad):
     return {
         "brand": str(raw_ad.get("marka") or "").strip(),
         "model": str(raw_ad.get("model") or raw_ad.get("model_2") or "").strip(),
+        "generation": str(raw_ad.get("model_2") or "").strip(),
         "year": _number(raw_ad.get("year")),
         "price": _number(raw_ad.get("price")),
         "mileage": _number(raw_ad.get("run")),
+        "engine": str(raw_ad.get("engine") or "").strip(),
+        "engine_volume": str(raw_ad.get("enginevol") or "").strip(),
+        "transmission": str(raw_ad.get("transmission") or "").strip(),
+        "body": str(raw_ad.get("body") or "").strip(),
+        "condition": str(raw_ad.get("condition") or "").strip(),
         "description": description,
         "info": description,
         "seller": seller,
@@ -57,7 +63,7 @@ async def parse_autoru():
 
     await asyncio.to_thread(ensure_real_price_access)
 
-    now = datetime.now()
+    now = now_moscow()
     params = {
         "login": AVITO_API_LOGIN,
         "token": AVITO_API_TOKEN,
