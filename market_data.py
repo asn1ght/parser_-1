@@ -9,12 +9,13 @@ from pathlib import Path
 from statistics import median, quantiles
 
 from config import FILTERS, now_moscow
-from quality_filters import is_acceptable_private_car
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / ".market.sqlite3"
 DB_PATH = Path(os.getenv("MARKET_DB_PATH", str(DEFAULT_DB_PATH)))
 TRIM_TOKENS = {"at", "mt", "cvt", "dsg", "акпп", "мкпп", "автомат", "механика"}
+_MODEL_NOISE_WORDS = {"рестайлинг", "restyling", "рест", "рестайл", "facelift", "fl"}
+_GENERATION_MARKERS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
 
 
 def _connect():
@@ -96,7 +97,23 @@ def _connect():
         )
         """
     )
+    _migrate_model_keys(connection)
     return connection
+
+
+def _migrate_model_keys(connection):
+    version = connection.execute("PRAGMA user_version").fetchone()[0] or 0
+    if version >= 2:
+        return
+    rows = connection.execute("SELECT source_id, model_key FROM market_observations").fetchall()
+    for row in rows:
+        new_key = _model_key(row["model_key"])
+        if new_key and new_key != row["model_key"]:
+            connection.execute(
+                "UPDATE market_observations SET model_key = ? WHERE source_id = ?",
+                (new_key, row["source_id"]),
+            )
+    connection.execute("PRAGMA user_version = 2")
 
 
 @contextmanager
@@ -123,6 +140,9 @@ def _model_key(value):
     model = _normalize_key(model)
     words = model.split()
     while words and words[-1] in TRIM_TOKENS:
+        words.pop()
+    words = [word for word in words if word not in _MODEL_NOISE_WORDS]
+    while len(words) > 1 and words[-1] in _GENERATION_MARKERS:
         words.pop()
     return " ".join(words)
 
@@ -264,18 +284,12 @@ def save_daily_report_candidates(report_day, ads):
     for ad in ads:
         site = str(ad.get("site") or "").strip().casefold()
         source_id = str(ad.get("source_id") or ad.get("url") or "").strip()
-        market_price = int(ad.get("market_price") or 0)
-        sample_count = int(ad.get("market_samples") or 0)
-        discount_pct = float(ad.get("discount_pct") or 0)
+        price = int(ad.get("price") or 0)
         if not (
             site
             and source_id
-            and ad.get("is_below_market")
             and not ad.get("red_flags")
-            and 0 < int(ad.get("price") or 0) <= FILTERS["max_price"]
-            and market_price > int(ad.get("price") or 0)
-            and sample_count >= FILTERS["market_min_samples"]
-            and discount_pct >= FILTERS["min_market_discount_pct"]
+            and 0 < price <= FILTERS["max_price"]
         ):
             continue
         rows.append((timestamp, site, source_id, json.dumps(ad, ensure_ascii=False)))
@@ -384,8 +398,8 @@ def save_quality_check(source_id, accepted, description="", checked_at=None):
         )
 
 
-def estimate_market_price(ad, *, history_days=30, min_samples=5, now=None):
-    """Estimate asking-market median from recent same-model listings."""
+def estimate_market_price(ad, *, history_days=30, min_samples=3, now=None):
+    """Estimate asking-market median from accumulated same-model observations."""
     brand_key = _normalize_key(ad.get("brand"))
     model_key = _model_key(ad.get("model"))
     year = int(ad.get("year") or 0)
@@ -395,70 +409,48 @@ def estimate_market_price(ad, *, history_days=30, min_samples=5, now=None):
         return None
 
     cutoff = ((now or now_moscow()) - timedelta(days=history_days)).isoformat(timespec="seconds")
-    with _connection() as connection:
-        rows = connection.execute(
-            """
-                        SELECT observations.source_id, observations.year, observations.price,
-                               observations.mileage, catalog.payload_json
-                        FROM market_observations AS observations
-                        JOIN listing_quality_checks AS quality
-                            ON quality.source_id = observations.source_id
-                         AND quality.accepted = 1
-                         AND quality.checked_at >= ?
-                        JOIN listing_catalog AS catalog
-                            ON catalog.source_id = observations.source_id
-                         AND catalog.last_seen_at >= ?
-                        WHERE observations.brand_key = ? AND observations.model_key = ?
-                            AND observations.year BETWEEN ? AND ?
-                            AND observations.observed_at >= ?
-                            AND observations.price > 0
-                            AND observations.price_quality = 'verified'
-                            AND observations.source_id != ?
-            """,
-            (cutoff, cutoff, brand_key, model_key, year - 1, year + 1, cutoff, source_id),
-        ).fetchall()
 
-    if not rows:
-        return None
+    def _fetch_rows(year_span):
+        with _connection() as connection:
+            return connection.execute(
+                """
+                SELECT o.source_id, o.year, o.price, o.mileage
+                FROM market_observations AS o
+                JOIN listing_quality_checks AS q
+                    ON q.source_id = o.source_id
+                   AND q.accepted = 1
+                   AND q.checked_at >= ?
+                WHERE o.brand_key = ? AND o.model_key = ?
+                  AND o.year BETWEEN ? AND ?
+                  AND o.observed_at >= ?
+                  AND o.price > 0
+                  AND o.price_quality = 'verified'
+                  AND o.source_id != ?
+                """,
+                (cutoff, brand_key, model_key, year - year_span, year + year_span, cutoff, source_id),
+            ).fetchall()
+
+    rows = list(_fetch_rows(1))
+    if len(rows) < min_samples:
+        rows = list(_fetch_rows(2))
 
     mileage = int(ad.get("mileage") or 0)
-    if mileage <= 0:
-        return None
-    mileage_tolerance = max(50000, int(mileage * 0.35))
-    comparable_pairs = []
-    for row in rows:
-        if row["mileage"] <= 0 or abs(row["mileage"] - mileage) > mileage_tolerance:
-            continue
-        listing = _stored_listing_matches(ad, row["payload_json"])
-        if listing:
-            comparable_pairs.append((row, listing))
-
-    same_site_pairs = [
-        pair for pair in comparable_pairs
-        if str(pair[1].get("site") or "").casefold() == str(ad.get("site") or "").casefold()
-    ]
-    same_site_rows = exclude_price_outliers(
-        [row for row, _ in same_site_pairs],
-        min_samples=min_samples,
-    )
-    if len(same_site_rows) >= min_samples:
-        comparable_rows = same_site_rows
+    if mileage > 0:
+        tolerance = max(50000, int(mileage * 0.5))
+        mileage_matched = [
+            row for row in rows
+            if row["mileage"] > 0 and abs(row["mileage"] - mileage) <= tolerance
+        ]
+        comparable_rows = mileage_matched if len(mileage_matched) >= min_samples else rows
     else:
-        comparable_rows = exclude_price_outliers(
-            [row for row, _ in comparable_pairs],
-            min_samples=min_samples,
-        )
+        comparable_rows = rows
+
+    comparable_rows = exclude_price_outliers(comparable_rows, min_samples=min_samples)
     if len(comparable_rows) < min_samples:
         return None
 
     market_price = int(median(row["price"] for row in comparable_rows))
     discount_pct = round((market_price - price) / market_price * 100, 1) if market_price else 0
-    used_ids = {row["source_id"] for row in comparable_rows}
-    market_sites = sorted({
-        str(listing.get("site") or "").casefold()
-        for row, listing in comparable_pairs
-        if row["source_id"] in used_ids and listing.get("site")
-    })
     used_years = [int(row["year"]) for row in comparable_rows]
     return {
         "market_price": market_price,
@@ -466,20 +458,5 @@ def estimate_market_price(ad, *, history_days=30, min_samples=5, now=None):
         "year_range": f"{min(used_years)}-{max(used_years)}",
         "mileage_matched": True,
         "discount_pct": discount_pct,
-        "market_sites": market_sites,
+        "market_sites": [],
     }
-
-
-def _stored_listing_matches(candidate, payload_json):
-    try:
-        listing = json.loads(payload_json)
-    except (TypeError, ValueError):
-        return None
-    if not is_acceptable_private_car(listing):
-        return None
-    for key in ("generation", "engine", "engine_volume", "transmission", "body"):
-        candidate_value = _normalize_key(candidate.get(key))
-        listing_value = _normalize_key(listing.get(key))
-        if candidate_value and listing_value and candidate_value != listing_value:
-            return None
-    return listing

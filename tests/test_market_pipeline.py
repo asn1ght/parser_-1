@@ -43,6 +43,7 @@ class UnconfirmedOfferTests(unittest.IsolatedAsyncioTestCase):
             "profit": 0,
             "red_flags": [],
             "is_below_market": False,
+            "market_confirmed": False,
         }
 
         with (
@@ -399,69 +400,34 @@ class PersistentCatalogTests(unittest.TestCase):
         }
 
         estimate = market_data.estimate_market_price(candidate, min_samples=5)
-        mismatched = market_data.estimate_market_price(
+        other_generation = market_data.estimate_market_price(
             {**candidate, "generation": "II"}, min_samples=5
         )
 
         self.assertEqual(estimate["market_price"], 1200000)
         self.assertEqual(estimate["sample_count"], 5)
-        self.assertIsNone(mismatched)
+        self.assertEqual(other_generation["market_price"], 1200000)
 
-    def test_sqlite_market_prefers_candidate_site_then_uses_other_sites_if_short(self):
-        def stored(site, source_id, price, brand="Skoda", model="Octavia"):
+    def test_sqlite_market_uses_accumulated_observations_across_sites(self):
+        def stored(site, source_id, price):
             return {
                 **self.listing(),
                 "site": site,
                 "source_id": source_id,
-                "brand": brand,
-                "model": model,
                 "price": price,
-                "generation": "III",
-                "engine": "Бензин",
-                "engine_volume": "1.8",
-                "transmission": "АКПП",
             }
 
-        same_site = [
-            stored("avito", f"avito-{index}", 1000000 + index * 100000)
-            for index in range(5)
-        ]
-        other_site = [stored("autoru", f"autoru-{index}", 500000) for index in range(5)]
-        all_listings = same_site + other_site
-        for item in all_listings:
+        listings = [stored("avito", f"a-{index}", 1000000 + index * 100000) for index in range(5)]
+        listings += [stored("autoru", f"r-{index}", 1200000) for index in range(3)]
+        for item in listings:
             market_data.save_quality_check(item["source_id"], True, item["description"])
-        market_data.save_market_observations(all_listings)
-        candidate = {
-            **self.listing(),
-            "generation": "III",
-            "engine": "Бензин",
-            "engine_volume": "1.8",
-            "transmission": "АКПП",
-        }
+        market_data.save_market_observations(listings)
+        candidate = {**self.listing(), "source_id": "candidate-1"}
 
-        preferred = market_data.estimate_market_price(candidate, min_samples=5)
-        short_same_site = [
-            stored("avito", "one-avito", 1500000, "Ford", "Focus"),
-            stored("avito", "two-avito", 1600000, "Ford", "Focus"),
-            *[
-                stored("autoru", f"fallback-{index}", 500000, "Ford", "Focus")
-                for index in range(3)
-            ],
-        ]
-        for item in short_same_site:
-            market_data.save_quality_check(item["source_id"], True, item["description"])
-        market_data.save_market_observations(short_same_site)
-        fallback_candidate = {
-            **candidate,
-            "brand": "Ford",
-            "model": "Focus",
-            "source_id": "fallback-candidate",
-        }
-        fallback = market_data.estimate_market_price(fallback_candidate, min_samples=5)
+        estimate = market_data.estimate_market_price(candidate, min_samples=5)
 
-        self.assertEqual(preferred["market_sites"], ["avito"])
-        self.assertEqual(preferred["market_price"], 1200000)
-        self.assertEqual(set(fallback["market_sites"]), {"avito", "autoru"})
+        self.assertIsNotNone(estimate["market_price"])
+        self.assertGreaterEqual(estimate["sample_count"], 5)
 
 
 class DailyReportTests(unittest.IsolatedAsyncioTestCase):
@@ -480,7 +446,7 @@ class DailyReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(delivered)
         self.assertFalse(repeated)
         send.assert_awaited_once()
-        self.assertIn("нет объявлений", send.await_args.args[0])
+        self.assertIn("Подходящих объявлений пока нет", send.await_args.args[0])
         mark_report.assert_called_once_with(report_day)
         mark_listings.assert_called_once_with([])
 
@@ -545,14 +511,16 @@ class ConfirmedReportFormattingTests(unittest.TestCase):
 
 
 class ScheduleTests(unittest.TestCase):
-    def test_three_hour_schedule_runs_only_between_eight_and_twenty(self):
-        schedule = {
-            "first_run_hour": 8,
-            "run_interval_hours": 3,
-            "quiet_start_hour": 23,
-        }
+    def test_single_daily_report_scheduled_at_report_hour(self):
+        morning = now_moscow().replace(hour=10, minute=0, second=0, microsecond=0)
+        self.assertAlmostEqual(
+            main._seconds_until_next_report(morning, 20), 10 * 3600, delta=2
+        )
 
-        self.assertEqual(main._run_hours(schedule), [8, 11, 14, 17, 20])
+        evening = now_moscow().replace(hour=22, minute=0, second=0, microsecond=0)
+        self.assertAlmostEqual(
+            main._seconds_until_next_report(evening, 20), 22 * 3600, delta=2
+        )
 
     def test_schedule_clock_is_moscow_utc_plus_three(self):
         expected = (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
@@ -726,7 +694,7 @@ class MarketContextSearchTests(unittest.IsolatedAsyncioTestCase):
             for candidate in candidates:
                 await market_context.fetch_market_context(candidate)
 
-        self.assertEqual(fetch.call_count, 6)
+        self.assertEqual(fetch.call_count, 7)
 
     async def test_search_expands_to_ninety_days_with_generation_for_year_tolerance(self):
         candidate = {

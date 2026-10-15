@@ -22,6 +22,12 @@ from parsers.autoru import parse_autoru
 from parsers.drom import parse_drom
 from quality_filters import is_acceptable_private_car
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hours=None):
     """Запускает парсинг всех площадок и возвращает топ-объявлений с анализом.
@@ -147,6 +153,23 @@ async def run_parser(collection_hours=None, seen_ids=None, archive_lookback_hour
     good_analyses.sort(key=lambda analysis: -float(analysis["discount_pct"]))
     top = good_analyses[:SCRAPING["top_count"]]
 
+    if not top:
+        # Нет подтверждённых «ниже рынка»: показываем чистые объявления без оценки рынка,
+        # чтобы бот не выдавал пустой результат. Отсортированы по цене.
+        unconfirmed = [
+            analysis
+            for analysis in analyses
+            if not analysis["red_flags"]
+            and 0 < int(analysis.get("price") or 0) <= FILTERS["max_price"]
+        ]
+        unconfirmed.sort(key=lambda analysis: int(analysis.get("price") or 0))
+        for analysis in unconfirmed:
+            analysis["priority"] = "⚪ РЫНОК НЕ ПОДТВЕРЖДЁН"
+            analysis["recommendation"] = (
+                "Цена ниже рынка не подтверждена аналогами. Проверьте объявление вручную."
+            )
+        top = unconfirmed[:SCRAPING["top_count"]]
+
     estimated_count = sum(analysis["market_price"] is not None for analysis in analyses)
     print(f"Оценено по аналогам: {estimated_count} из {len(analyses)}")
     print(f"Ниже рынка на заданный порог: {len(good_analyses)}")
@@ -181,22 +204,10 @@ async def send_daily_report(report_day, *, console=False):
     return delivered
 
 
-def _run_hours(schedule):
-    hours = []
-    hour = schedule["first_run_hour"]
-    while hour < schedule["quiet_start_hour"]:
-        hours.append(hour)
-        hour += schedule["run_interval_hours"]
-    return hours
-
-
-def _seconds_until_next_run(now, run_hours, first_run_hour):
-    current = now.hour + now.minute / 60.0 + now.second / 3600.0
-    for hour in run_hours:
-        if current < hour:
-            target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            return max(0.0, (target - now).total_seconds())
-    target = (now + timedelta(days=1)).replace(hour=first_run_hour, minute=0, second=0, microsecond=0)
+def _seconds_until_next_report(now, report_hour):
+    target = now.replace(hour=report_hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
     return (target - now).total_seconds()
 
 
@@ -221,53 +232,31 @@ async def main():
                 mark_listings_sent(top)
         return
 
-    run_hours = _run_hours(SCHEDULE)
-    seen_ids = set()
+    report_hour = SCHEDULE["report_hour"]
     print(
-        f"Сбор: {', '.join(f'{h}:00' for h in run_hours)}; "
-        f"один Telegram-отчёт в {run_hours[-1]:02d}:00; "
-        f"тишина с {SCHEDULE['quiet_start_hour']}:00 до {SCHEDULE['first_run_hour']}:00"
+        f"Один ежедневный прогон в {report_hour:02d}:00 — сбор со всех площадок, "
+        f"анализ рынка и отправка отчёта. В остальное время тишина."
     )
 
     while True:
         now = now_moscow()
-        delay = _seconds_until_next_run(now, run_hours, SCHEDULE["first_run_hour"])
-        print(f"\n⏳ Следующий запуск через ~{int(delay // 60)} мин...")
+        delay = _seconds_until_next_report(now, report_hour)
+        print(f"\n⏳ Следующий запуск в {report_hour:02d}:00 (~{int(delay // 60)} мин)...")
         await asyncio.sleep(delay)
 
-        now = now_moscow()
-        if now.hour == SCHEDULE["first_run_hour"]:
-            seen_ids.clear()
-            collection_hours = SCHEDULE["morning_lookback_hours"]
-            archive_lookback_hours = SCHEDULE["archive_lookback_hours"]
-            print(f"🌅 Утренний прогон: архив за {archive_lookback_hours} часов")
-        else:
-            collection_hours = SCHEDULE["regular_lookback_hours"]
-            archive_lookback_hours = None
-
         try:
-            top = await run_parser(
-                collection_hours=collection_hours,
-                seen_ids=seen_ids,
-                archive_lookback_hours=archive_lookback_hours,
-            )
-            report_day = now.date().isoformat()
+            top = await run_parser()
+            report_day = now_moscow().date().isoformat()
             save_daily_report_candidates(report_day, top)
-            if now.hour == run_hours[-1]:
-                delivered = await send_daily_report(report_day, console=args.console)
-                if not delivered and not args.console:
-                    print("Ежедневный Telegram-отчёт не отправлен; проверяю Telegram-настройки и доступность.")
-            else:
-                print(
-                    f"В дневную сводку добавлено подтверждённых предложений: {len(top)}; "
-                    f"отчёт будет отправлен в {run_hours[-1]:02d}:00."
-                )
+            delivered = await send_daily_report(report_day, console=args.console)
+            if not delivered and not args.console:
+                print("Ежедневный Telegram-отчёт не отправлен; проверяю Telegram-настройки и доступность.")
         except KeyboardInterrupt:
             print("\nОстановка парсера.")
             sys.exit(0)
         except Exception as e:
             print(f"\nОшибка в цикле: {e}")
-            print("Следующая попытка по расписанию...")
+            print(f"Следующая попытка завтра в {report_hour:02d}:00...")
 
 
 if __name__ == "__main__":

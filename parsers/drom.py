@@ -64,43 +64,51 @@ async def parse_drom():
 
     await asyncio.to_thread(ensure_real_price_access)
 
+    now = now_moscow()
+    limit = min(1000, SCRAPING["listing_api_limit"])
     params = {
         "login": AVITO_API_LOGIN,
         "token": AVITO_API_TOKEN,
         "region_id": FILTERS["drom_api_region_id"],
         "price2": FILTERS["market_max_price"],
-        "limit": SCRAPING["listing_api_limit"],
+        "limit": limit,
         "offset": 0,
         "format": "json",
     }
-    now = now_moscow()
     lookback_hours = FILTERS["drom_lookback_hours"]
     # Drom API принимает date1/date2 только в формате YYYY-MM-DD (с временем возвращает 0),
     # поэтому берём окно в целых днях, а точное окно отсекаем клиентски по полю dt.
     days_back = max(1, int(ceil(lookback_hours / 24)))
     params["date1"] = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
     params["date2"] = now.strftime("%Y-%m-%d")
-    try:
-        response = await asyncio.to_thread(requests.get, API_URL, params=params, timeout=30)
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Drom REST-App request failed ({type(exc).__name__})") from None
 
-    if response.status_code >= 400:
-        message = _extract_api_message(response)
-        raise RuntimeError(f"Drom REST-App returned HTTP {response.status_code}: {message}")
-    try:
-        payload = response.json()
-    except ValueError:
-        raise RuntimeError("Drom REST-App returned invalid JSON") from None
-    if payload.get("status") != "ok":
-        message = str(payload.get("message") or payload.get("error") or "unknown API error")
-        for secret in (AVITO_API_LOGIN, AVITO_API_TOKEN):
-            message = message.replace(secret, "<redacted>")
-        raise RuntimeError(f"Drom REST-App error: {message}")
-
-    data = payload.get("data", [])
-    if not isinstance(data, list):
-        raise RuntimeError("Drom REST-App returned an unexpected data format")
+    data = []
+    max_pages = max(1, SCRAPING["max_pages_per_site"])
+    for page_index in range(max_pages):
+        params["offset"] = page_index * limit
+        try:
+            response = await asyncio.to_thread(requests.get, API_URL, params=params, timeout=30)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Drom REST-App request failed ({type(exc).__name__})") from None
+        if response.status_code >= 400:
+            message = _extract_api_message(response)
+            raise RuntimeError(f"Drom REST-App returned HTTP {response.status_code}: {message}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise RuntimeError("Drom REST-App returned invalid JSON") from None
+        if payload.get("status") != "ok":
+            message = str(payload.get("message") or payload.get("error") or "unknown API error")
+            for secret in (AVITO_API_LOGIN, AVITO_API_TOKEN):
+                message = message.replace(secret, "<redacted>")
+            raise RuntimeError(f"Drom REST-App error: {message}")
+        page_data = payload.get("data", [])
+        if not isinstance(page_data, list):
+            raise RuntimeError("Drom REST-App returned an unexpected data format")
+        data.extend(page_data)
+        if len(page_data) < limit or page_index == max_pages - 1:
+            break
+        await asyncio.sleep(SCRAPING["delay_min"])
 
     accepted = []
     rejected_count = 0

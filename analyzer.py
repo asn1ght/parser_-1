@@ -48,6 +48,7 @@ def analyze_car(ad, comparables=None):
         "profit": 0,
         "red_flags": [],
         "is_below_market": False,
+        "market_confirmed": False,
         "priority": "⚪ НЕДОСТАТОЧНО АНАЛОГОВ",
         "recommendation": "Недостаточно сопоставимых объявлений для оценки рынка.",
     }
@@ -70,6 +71,11 @@ def analyze_car(ad, comparables=None):
             "profit": profit,
             "red_flags": red_flags,
             "is_below_market": is_below_market,
+            "market_confirmed": bool(
+                is_below_market
+                and not red_flags
+                and estimate["sample_count"] >= FILTERS["market_min_samples"]
+            ),
         }
     )
 

@@ -21,6 +21,8 @@ _SEARCHES_THIS_RUN = 0
 _SEARCH_STATE = {}
 _SEARCHED_KEYS_THIS_RUN = set()
 _LAST_CONTEXT_REQUEST_AT = None
+_MODEL_NOISE_WORDS = {"рестайлинг", "restyling", "рест", "рестайл", "facelift", "fl"}
+_GENERATION_MARKERS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
 
 
 class QuotaExhausted(RuntimeError):
@@ -53,6 +55,9 @@ def _model_key(value):
     words = _norm_key(model).split()
     while words and words[-1] in {"at", "mt", "cvt", "dsg", "акпп", "мкпп", "автомат", "механика"}:
         words.pop()
+    words = [word for word in words if word not in _MODEL_NOISE_WORDS]
+    while len(words) > 1 and words[-1] in _GENERATION_MARKERS:
+        words.pop()
     return " ".join(words)
 
 
@@ -69,6 +74,30 @@ def _param_value(raw, *terms):
     return ""
 
 
+def _avito_mileage(raw):
+    title = str(raw.get("title") or "").casefold().replace("\xa0", " ")
+    match = re.search(
+        r"(\d[\d ]*(?:[-–—]\s*\d[\d ]*)?)\s*(тыс\.?|тысяч(?:а|и)?|км)\b",
+        title,
+    )
+    if match:
+        values = [_number(value) for value in re.findall(r"\d[\d ]*", match.group(1))]
+        if values:
+            mileage = max(values)
+            return mileage * 1000 if match.group(2).startswith("тыс") and mileage < 1000 else mileage
+    for item in raw.get("params", []):
+        if not isinstance(item, dict) or "пробег" not in str(item.get("name") or "").casefold():
+            continue
+        value = str(item.get("value") or "").casefold().replace("\xa0", " ")
+        values = [_number(number) for number in re.findall(r"\d[\d ]*", value)]
+        if values:
+            mileage = max(values)
+            if "тыс" in value and mileage < 1000:
+                mileage *= 1000
+            return mileage
+    return 0
+
+
 def _to_comparable(raw, site):
     seller = str(raw.get("seller") or raw.get("name") or "").strip()
     price_conditions = [
@@ -80,13 +109,33 @@ def _to_comparable(raw, site):
             for word in ("кредит", "трейд", "услов", "оплат", "цена")
         )
     ]
+
+    brand = str(raw.get("marka") or "").strip()
+    model = str(raw.get("model") or raw.get("model_2") or "").strip()
+    year = _number(raw.get("year"))
+    mileage = _number(raw.get("run"))
+
+    # Avito отдаёт title/params вместо marka/model/year/run — извлекаем из заголовка.
+    if site == "avito" and (not brand or not model):
+        title = str(raw.get("title") or "")
+        title_parts = [part.strip() for part in title.split(",")]
+        name_parts = (title_parts[0] if title_parts else "").split()
+        if name_parts:
+            brand = brand or name_parts[0]
+            model = model or " ".join(name_parts[1:])
+        if not year:
+            year_match = re.search(r"\b(?:19|20)\d{2}\b", title)
+            year = int(year_match.group()) if year_match else 0
+        if not mileage:
+            mileage = _avito_mileage(raw)
+
     return {
-        "brand": str(raw.get("marka") or "").strip(),
-        "model": str(raw.get("model") or raw.get("model_2") or "").strip(),
+        "brand": brand,
+        "model": model,
         "generation": str(raw.get("generation") or raw.get("model_2") or _param_value(raw, "поколение")).strip(),
-        "year": _number(raw.get("year")),
+        "year": year,
         "price": _number(raw.get("price")),
-        "mileage": _number(raw.get("run")),
+        "mileage": mileage,
         "engine": str(raw.get("engine") or _param_value(raw, "тип двигателя", "двигатель")).strip(),
         "engine_volume": str(raw.get("engine_volume") or raw.get("enginevol") or _param_value(raw, "объем двигателя")).strip(),
         "transmission": str(raw.get("transmission") or _param_value(raw, "коробка передач", "трансмиссия")).strip(),

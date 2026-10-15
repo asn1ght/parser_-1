@@ -47,17 +47,14 @@ async def send_telegram_message(text):
 def format_report(analyses):
     """Форматирует результаты в текст для Telegram с актуальными ссылками."""
     lines = []
-    lines.append("🔍 *Подтверждённые предложения рынка*")
+    lines.append("🔍 *Парсер авто — предложения*")
     lines.append(f"Найдено объявлений: {len(analyses)}")
     lines.append(f"Показано топ-{len(analyses)}")
     lines.append("──────────────────────────")
     lines.append("")
 
     if not analyses:
-        lines.append(
-            "Пока нет объявлений с подтверждённой скидкой к рынку. "
-            f"Для оценки нужно минимум {FILTERS['market_min_samples']} сопоставимых объявлений."
-        )
+        lines.append("Подходящих объявлений пока нет.")
 
     for i, a in enumerate(analyses, 1):
         source_labels = {"avito": "Avito", "autoru": "Auto.ru", "drom": "Drom"}

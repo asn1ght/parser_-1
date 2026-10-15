@@ -120,6 +120,55 @@ def _normalize_ad(ad):
     }
 
 
+async def _fetch_pages(limit, lookback_hours):
+    """Собрать страницы Avito по offset; остановиться на неполной странице."""
+    now = now_moscow()
+    params = {
+        "login": AVITO_API_LOGIN,
+        "token": AVITO_API_TOKEN,
+        "category_id": 9,
+        "region_id": FILTERS["avito_region_id"],
+        "limit": limit,
+        "offset": 0,
+        "format": "json",
+    }
+    if lookback_hours > 0:
+        params["date1"] = (now - timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        params["date2"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        params["last_m"] = min(30, max(1, FILTERS["avito_lookback_minutes"]))
+
+    data = []
+    max_pages = max(1, SCRAPING["max_pages_per_site"])
+    for page_index in range(max_pages):
+        params["offset"] = page_index * limit
+        try:
+            response = await asyncio.to_thread(requests.get, API_URL, params=params, timeout=30)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Avito REST-App request failed ({type(exc).__name__})") from None
+        if response.status_code >= 400:
+            message = _extract_api_message(response)
+            raise RuntimeError(f"Avito REST-App returned HTTP {response.status_code}: {message}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise RuntimeError("Avito REST-App returned invalid JSON") from None
+        if payload.get("status") != "ok":
+            message = str(payload.get("message") or payload.get("error") or "unknown API error")
+            for secret in (AVITO_API_LOGIN, AVITO_API_TOKEN):
+                message = message.replace(secret, "<redacted>")
+            raise RuntimeError(f"Avito REST-App error: {message}")
+        page_data = payload.get("data", [])
+        if not isinstance(page_data, list):
+            raise RuntimeError("Avito REST-App returned an unexpected data format")
+        data.extend(page_data)
+        if len(page_data) < limit or page_index == max_pages - 1:
+            break
+        await asyncio.sleep(SCRAPING["delay_min"])
+
+    return data
+
+
 async def parse_avito():
     """Fetch recent Saint Petersburg car ads from the REST-App Avito API."""
     if not AVITO_API_LOGIN or not AVITO_API_TOKEN:
@@ -127,46 +176,21 @@ async def parse_avito():
 
     await asyncio.to_thread(ensure_real_price_access)
 
-    now = now_moscow()
-    params = {
-        "login": AVITO_API_LOGIN,
-        "token": AVITO_API_TOKEN,
-        "category_id": 9,
-        "region_id": FILTERS["avito_region_id"],
-        "limit": SCRAPING["listing_api_limit"],
-        "offset": 0,
-        "format": "json",
-    }
+    limit = min(1000, SCRAPING["listing_api_limit"])
     lookback_hours = FILTERS["avito_lookback_hours"]
-    if lookback_hours > 0:
-        params["date1"] = (now - timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M:%S")
-        params["date2"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        params["last_m"] = min(30, max(1, FILTERS["avito_lookback_minutes"]))
-
     try:
-        response = await asyncio.to_thread(requests.get, API_URL, params=params, timeout=30)
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Avito REST-App request failed ({type(exc).__name__})") from None
+        data = await _fetch_pages(limit, lookback_hours)
+    except RuntimeError as exc:
+        # Avito REST-App может отвечать HTTP 500 на limit=1000 и/или широкое окно;
+        # пробуем заведомо безопасную комбинацию (250 объявлений, 2 часа).
+        safe_limit = min(limit, 250)
+        safe_hours = min(lookback_hours, 2) if lookback_hours > 0 else lookback_hours
+        if "HTTP 500" in str(exc) and (safe_limit < limit or safe_hours < lookback_hours):
+            print("[Avito API] HTTP 500 на широких параметрах; повтор с limit=250 и окном 2ч")
+            data = await _fetch_pages(safe_limit, safe_hours)
+        else:
+            raise
 
-    if response.status_code >= 400:
-        message = _extract_api_message(response)
-        raise RuntimeError(f"Avito REST-App returned HTTP {response.status_code}: {message}")
-
-    try:
-        payload = response.json()
-    except ValueError:
-        raise RuntimeError("Avito REST-App returned invalid JSON") from None
-
-    if payload.get("status") != "ok":
-        message = str(payload.get("message") or payload.get("error") or "unknown API error")
-        for secret in (AVITO_API_LOGIN, AVITO_API_TOKEN):
-            message = message.replace(secret, "<redacted>")
-        raise RuntimeError(f"Avito REST-App error: {message}")
-
-    data = payload.get("data", [])
-    if not isinstance(data, list):
-        raise RuntimeError("Avito REST-App returned an unexpected data format")
     if data and not any(isinstance(item, dict) and _number(item.get("price")) > 0 for item in data):
         raise RuntimeError(
             "Avito REST-App returned listings without usable prices; "
